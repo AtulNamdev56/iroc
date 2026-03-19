@@ -1,0 +1,273 @@
+#include <SPI.h>
+#include <RF24.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+#define CE_PIN   4
+#define CSN_PIN  5
+#define SCK_PIN  18
+#define MISO_PIN 19
+#define MOSI_PIN 23
+#define RELAY_PIN 2
+
+RF24 radio(CE_PIN, CSN_PIN);
+const byte address[6] = "00001";
+
+const char* ssid     = "Team Nakshatra";
+const char* password = "nakshatra123";
+
+WebServer server(80);
+
+bool relayState = false;
+bool nrfOK      = false;
+
+struct TelemetryData {
+  float x, y;
+  float vx, vy;
+  float alt;
+  float voltage;
+  float current;
+  float percentage;
+};
+
+TelemetryData data;
+
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Team Nakshatra</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:monospace;background:#0a0a0f;padding:14px;color:#fff}
+.wrap{max-width:460px;margin:0 auto}
+.hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;padding-bottom:12px;border-bottom:1px solid #1a1a2a}
+.title{font-size:15px;font-weight:bold;color:#fff}.title span{color:#a78bfa}
+.sub{font-size:10px;color:#444;margin-top:2px}
+.live{display:flex;align-items:center;gap:5px;font-size:10px;color:#34d399;background:#081f14;border:1px solid #145232;padding:4px 10px;border-radius:99px}
+.dot{width:6px;height:6px;border-radius:50%;background:#34d399;animation:blink 1.2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}
+.sec{font-size:9px;color:#444;text-transform:uppercase;letter-spacing:.1em;margin-bottom:7px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.card{border-radius:10px;padding:12px 14px}
+.lbl{font-size:9px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px;opacity:.8}
+.val{font-size:22px;font-weight:bold;line-height:1}
+.unit{font-size:10px;margin-left:3px;opacity:.5}
+.pu{background:#1a0d40}.pu .lbl{color:#a78bfa}.pu .val{color:#e9d5ff}
+.bu{background:#0c1e3a}.bu .lbl{color:#60a5fa}.bu .val{color:#bfdbfe}
+.tu{background:#052e1e}.tu .lbl{color:#34d399}.tu .val{color:#a7f3d0}
+.bat{background:#0b2a14;border-radius:10px;padding:13px 15px;margin-bottom:16px}
+.bat-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}
+.bat-num{font-size:28px;font-weight:bold;color:#4ade80}
+.bat-lbl{font-size:9px;color:#34d399;text-transform:uppercase;letter-spacing:.08em}
+.trk{height:8px;background:#0a1f0a;border-radius:99px;overflow:hidden}
+.fill{height:100%;border-radius:99px;background:#4ade80;transition:width .5s}
+.divhr{border-top:1px solid #1a1a2a;margin:0 0 16px}
+.sec-ctrl{font-size:9px;color:#444;text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px}
+.ctrl-grid{display:grid;grid-template-columns:1fr;gap:10px}
+.cbtn{border:none;border-radius:10px;padding:14px 16px;cursor:pointer;font-family:monospace;display:flex;justify-content:space-between;align-items:center;width:100%}
+.cbtn .cl{font-size:9px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}
+.cbtn .cv{font-size:14px;font-weight:bold}
+.cbtn .tag{font-size:10px;padding:3px 10px;border-radius:99px}
+.relay-off{background:#111827}.relay-off .cl{color:#6b7280}.relay-off .cv{color:#9ca3af}.relay-off .tag{background:#1f2937;color:#6b7280}
+.relay-on{background:#14532d}.relay-on .cl{color:#4ade80}.relay-on .cv{color:#bbf7d0}.relay-on .tag{background:#166534;color:#4ade80}
+.arm-btn{background:#1a0d40}.arm-btn .cl{color:#a78bfa}.arm-btn .cv{color:#c4b5fd}.arm-btn .tag{background:#2e1065;color:#a78bfa}
+.disarm-btn{background:#3b0d0d}.disarm-btn .cl{color:#f87171}.disarm-btn .cv{color:#fecaca}.disarm-btn .tag{background:#7f1d1d;color:#fca5a5}
+.mode-manual{background:#1a1500}.mode-manual .cl{color:#fbbf24}.mode-manual .cv{color:#fef08a}.mode-manual .tag{background:#451a03;color:#fbbf24}
+.mode-auto{background:#0c1e3a}.mode-auto .cl{color:#60a5fa}.mode-auto .cv{color:#bfdbfe}.mode-auto .tag{background:#1e3a5f;color:#60a5fa}
+.tkoff-standby{background:#111827}.tkoff-standby .cl{color:#6b7280}.tkoff-standby .cv{color:#9ca3af}.tkoff-standby .tag{background:#1f2937;color:#6b7280}
+.tkoff-ready{background:#052e1e}.tkoff-ready .cl{color:#34d399}.tkoff-ready .cv{color:#a7f3d0}.tkoff-ready .tag{background:#065f46;color:#34d399}
+</style></head><body>
+<div class="wrap">
+
+  <div class="hdr">
+    <div><div class="title">&#9733; <span>Nakshatra</span></div><div class="sub">ESP32 Live Telemetry</div></div>
+    <div class="live"><div class="dot"></div>Live</div>
+  </div>
+
+  <div class="sec">Position</div>
+  <div class="g2">
+    <div class="card pu"><div class="lbl">X axis</div><div class="val"><span id="x">--</span><span class="unit">cm</span></div></div>
+    <div class="card pu"><div class="lbl">Y axis</div><div class="val"><span id="y">--</span><span class="unit">cm</span></div></div>
+  </div>
+
+  <div class="sec">Velocity</div>
+  <div class="g2">
+    <div class="card bu"><div class="lbl">Vel X</div><div class="val"><span id="vx">--</span><span class="unit">cm/s</span></div></div>
+    <div class="card bu"><div class="lbl">Vel Y</div><div class="val"><span id="vy">--</span><span class="unit">cm/s</span></div></div>
+  </div>
+
+  <div class="sec">Altitude</div>
+  <div class="card tu" style="margin-bottom:12px">
+    <div class="lbl">Height</div>
+    <div class="val" style="font-size:26px"><span id="alt">--</span><span class="unit" style="font-size:11px">cm</span></div>
+  </div>
+
+  <div class="sec">Battery</div>
+  <div class="bat">
+    <div class="bat-row">
+      <div class="bat-num"><span id="pct">--</span>%</div>
+      <div class="bat-lbl" id="batst">Charge level</div>
+    </div>
+    <div class="trk"><div class="fill" id="bf" style="width:0%"></div></div>
+  </div>
+
+  <div class="divhr"></div>
+  <div class="sec-ctrl">Controls</div>
+  <div class="ctrl-grid">
+
+    <!-- 1. RELAY - real GPIO pin 2 -->
+    <button class="cbtn relay-off" id="bRelay" onclick="tRelay()">
+      <div><div class="cl">Charging (GPIO 2)</div><div class="cv" id="relayTxt">Off</div></div>
+      <span class="tag" id="relayTag">OFF</span>
+    </button>
+
+    <!-- 2. ARM / DISARM -->
+    <button class="cbtn arm-btn" id="bArm" onclick="tArm()">
+      <div><div class="cl">Flight State</div><div class="cv" id="armTxt">Arm</div></div>
+      <span class="tag" id="armTag">DISARMED</span>
+    </button>
+
+    <!-- 3. MANUAL / AUTONOMOUS -->
+    <button class="cbtn mode-manual" id="bMode" onclick="tMode()">
+      <div><div class="cl">Flight Mode</div><div class="cv" id="modeTxt">Manual</div></div>
+      <span class="tag" id="modeTag">MANUAL</span>
+    </button>
+
+    <!-- 4. TAKEOFF -->
+    <button class="cbtn tkoff-standby" id="bTkoff" onclick="tTkoff()">
+      <div><div class="cl">Takeoff</div><div class="cv" id="tkoffTxt">Standby</div></div>
+      <span class="tag" id="tkoffTag">STANDBY</span>
+    </button>
+
+  </div>
+</div>
+<script>
+var armed=false, modeAuto=false, tkReady=false;
+
+function tRelay(){
+  fetch('/relay').then(r=>r.json()).then(d=>{
+    var on=d.relay;
+    document.getElementById('bRelay').className='cbtn '+(on?'relay-on':'relay-off');
+    document.getElementById('relayTxt').textContent=on?'On':'Off';
+    document.getElementById('relayTag').textContent=on?'ON':'OFF';
+  });
+}
+
+function tArm(){
+  armed=!armed;
+  var b=document.getElementById('bArm');
+  b.className='cbtn '+(armed?'disarm-btn':'arm-btn');
+  document.getElementById('armTxt').textContent=armed?'Disarm':'Arm';
+  document.getElementById('armTag').textContent=armed?'ARMED':'DISARMED';
+}
+
+function tMode(){
+  modeAuto=!modeAuto;
+  var b=document.getElementById('bMode');
+  b.className='cbtn '+(modeAuto?'mode-auto':'mode-manual');
+  document.getElementById('modeTxt').textContent=modeAuto?'Autonomous':'Manual';
+  document.getElementById('modeTag').textContent=modeAuto?'AUTO':'MANUAL';
+}
+
+function tTkoff(){
+  tkReady=!tkReady;
+  var b=document.getElementById('bTkoff');
+  b.className='cbtn '+(tkReady?'tkoff-ready':'tkoff-standby');
+  document.getElementById('tkoffTxt').textContent=tkReady?'Ready':'Standby';
+  document.getElementById('tkoffTag').textContent=tkReady?'READY':'STANDBY';
+}
+
+function upd(){
+  fetch('/data').then(r=>r.json()).then(d=>{
+    document.getElementById('x').textContent=d.x.toFixed(1);
+    document.getElementById('y').textContent=d.y.toFixed(1);
+    document.getElementById('vx').textContent=d.vx.toFixed(1);
+    document.getElementById('vy').textContent=d.vy.toFixed(1);
+    document.getElementById('alt').textContent=d.alt.toFixed(1);
+    var pc=Math.min(100,Math.max(0,d.percentage));
+    document.getElementById('pct').textContent=pc.toFixed(0);
+    var f=document.getElementById('bf');
+    f.style.width=pc+'%';
+    f.style.background=pc>60?'#4ade80':pc>30?'#fbbf24':'#f87171';
+    document.getElementById('batst').textContent=pc>60?'Good':pc>30?'Low':'Critical';
+  }).catch(()=>{});
+}
+setInterval(upd,500);upd();
+</script>
+</body></html>
+)rawliteral";
+
+void handleRoot() {
+  server.send(200, "text/html", INDEX_HTML);
+}
+
+void handleData() {
+  String json = "{";
+  json += "\"x\":"          + String(data.x, 1) + ",";
+  json += "\"y\":"          + String(data.y, 1) + ",";
+  json += "\"vx\":"         + String(data.vx, 1) + ",";
+  json += "\"vy\":"         + String(data.vy, 1) + ",";
+  json += "\"alt\":"        + String(data.alt, 1) + ",";
+  json += "\"percentage\":" + String(data.percentage, 0);
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleRelay() {
+  relayState = !relayState;
+  digitalWrite(RELAY_PIN, relayState ? HIGH : LOW);
+  String json = "{\"relay\":";
+  json += relayState ? "true" : "false";
+  json += "}";
+  server.send(200, "application/json", json);
+  Serial.print("Charging GPIO2: "); Serial.println(relayState ? "ON" : "OFF");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+
+  // WiFi FIRST - always accessible
+  WiFi.softAP(ssid, password);
+  IPAddress ip = WiFi.softAPIP();
+  Serial.print("Hotspot: "); Serial.println(ssid);
+  Serial.print("Dashboard: http://"); Serial.println(ip);
+  server.on("/",      handleRoot);
+  server.on("/data",  handleData);
+  server.on("/relay", handleRelay);
+  server.begin();
+  Serial.println("Web server started");
+
+  // NRF AFTER WiFi
+  Serial.println("NRF Receiver Starting...");
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, CSN_PIN);
+  if (!radio.begin()) {
+    Serial.println("NRF NOT DETECTED - check wiring & 3.3V power");
+    nrfOK = false;
+    return;
+  }
+  nrfOK = true;
+  Serial.println("NRF detected");
+  radio.setChannel(115);
+  radio.setPALevel(RF24_PA_LOW);
+  radio.setDataRate(RF24_250KBPS);
+  radio.openReadingPipe(0, address);
+  radio.startListening();
+}
+
+void loop() {
+  server.handleClient();
+  if (nrfOK && radio.available()) {
+    radio.read(&data, sizeof(data));
+    Serial.print("X: "); Serial.print(data.x, 1);
+    Serial.print(" cm | Y: "); Serial.print(data.y, 1);
+    Serial.print(" | VX: "); Serial.print(data.vx, 1);
+    Serial.print(" cm/s | VY: "); Serial.print(data.vy, 1);
+    Serial.print(" | ALT: "); Serial.print(data.alt, 1); Serial.print(" cm");
+    Serial.print(" | BAT: "); Serial.print(data.percentage, 0); Serial.println(" %");
+  }
+}
